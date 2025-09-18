@@ -1614,8 +1614,6 @@ msgstr "API Keys"
 msgid "New API Key"
 msgstr "New API Key"
 
-msgid "Prefix"
-msgstr "Prefix"
 
 msgid "Status"
 msgstr "Status"

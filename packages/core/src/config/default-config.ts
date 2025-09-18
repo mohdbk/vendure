@@ -18,6 +18,7 @@ import { DefaultAssetNamingStrategy } from './asset-naming-strategy/default-asse
 import { NoAssetPreviewStrategy } from './asset-preview-strategy/no-asset-preview-strategy';
 import { NoAssetStorageStrategy } from './asset-storage-strategy/no-asset-storage-strategy';
 import { BcryptPasswordHashingStrategy } from './auth/bcrypt-password-hashing-strategy';
+import { DefaultApiKeyGenerationStrategy } from './auth/default-api-key-generation-strategy';
 import { DefaultPasswordValidationStrategy } from './auth/default-password-validation-strategy';
 import { DefaultVerificationTokenStrategy } from './auth/default-verification-token-strategy';
 import { NativeAuthenticationStrategy } from './auth/native-authentication-strategy';
@@ -103,11 +104,11 @@ export const defaultConfig: RuntimeVendureConfig = {
         },
         authTokenHeaderKey: DEFAULT_AUTH_TOKEN_HEADER_KEY,
         sessionDuration: '1y',
-        // Admin API key options
-        // @since 3.5.0
-        adminApiKey: {
-            sessionDuration: '15m',
-            prefix: { live: 'vk_live_', test: 'vk_test_' },
+        // API key options
+        apiKey: {
+            generationStrategy: new DefaultApiKeyGenerationStrategy(),
+            admin: { enabled: true },
+            shop: { enabled: false },
         },
         sessionCacheStrategy: new DefaultSessionCacheStrategy(),
         sessionCacheTTL: 300,

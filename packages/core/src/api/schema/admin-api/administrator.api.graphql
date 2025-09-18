@@ -28,11 +28,6 @@ input CreateAdministratorInput {
     emailAddress: String!
     password: String!
     roleIds: [ID!]!
-    """
-    Set to true to create a service account. SuperAdmin only.
-    @since 3.5.0
-    """
-    isServiceAccount: Boolean
 }
 
 input UpdateAdministratorInput {
@@ -42,11 +37,6 @@ input UpdateAdministratorInput {
     emailAddress: String
     password: String
     roleIds: [ID!]
-    """
-    Update service-account flag (SuperAdmin only).
-    @since 3.5.0
-    """
-    isServiceAccount: Boolean
 }
 
 input UpdateActiveAdministratorInput {

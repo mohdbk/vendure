@@ -1,8 +1,8 @@
 import { DeepPartial } from '@vendure/common/lib/shared-types';
 import { Column, Entity, Index, ManyToOne } from 'typeorm';
 
-import { Administrator } from '../administrator/administrator.entity';
 import { VendureEntity } from '../base/base.entity';
+import { User } from '../user/user.entity';
 
 /**
  * Admin API key bound to an Administrator.
@@ -14,15 +14,14 @@ export class ApiKey extends VendureEntity {
     constructor(input?: DeepPartial<ApiKey>) {
         super(input);
     }
-    /** Administrator whose Roles/Channels are inherited. @since 3.5.0 */
-    @ManyToOne(() => Administrator, { onDelete: 'CASCADE', eager: true })
-    @Index()
-    administrator: Administrator;
 
-    /** Key prefix (e.g., "vk_live_") for quick identification. @since 3.5.0 */
-    @Column()
+    /**
+     * User (Admin or Customer) who owns this key and whose Roles/Permissions/Channels are used.
+     * @since 3.5.0
+     */
+    @ManyToOne(() => User, { onDelete: 'CASCADE', eager: true })
     @Index()
-    prefix: string;
+    user: User;
 
     /** Human-readable label. @since 3.5.0 */
     @Column()
@@ -32,14 +31,23 @@ export class ApiKey extends VendureEntity {
     @Column()
     keyHash: string;
 
+    /**
+     * Stable lookup hash of the raw key, used for direct database lookup without iterating keys.
+     * Typically a SHA-256 hex digest of the raw key, or as produced by the configured generation strategy.
+     * @since 3.5.0
+     */
+    @Column({ unique: true })
+    @Index({ unique: true })
+    lookupHash: string;
+
     /** active|revoked status. @since 3.5.0 */
     @Column({ default: 'active' })
     @Index()
     status: 'active' | 'revoked';
 
-    /** Optional expiry time. @since 3.5.0 */
-    @Column({ type: Date, nullable: true })
-    expiresAt: Date | null;
+    /** Expiry time (required). @since 3.5.0 */
+    @Column({ type: Date, nullable: false })
+    expiresAt: Date;
 
     /** Time of revocation. @since 3.5.0 */
     @Column({ type: Date, nullable: true })
@@ -56,4 +64,13 @@ export class ApiKey extends VendureEntity {
     /** Optional notes. @since 3.5.0 */
     @Column({ type: 'text', nullable: true })
     notes: string | null;
+
+    /**
+     * Scope indicates intended API surface. Currently 'admin' is used for Admin API keys.
+     * 'shop' may be used for Shop API keys.
+     * @since 3.5.0
+     */
+    @Column({ default: 'admin' })
+    @Index()
+    scope: 'admin' | 'shop';
 }

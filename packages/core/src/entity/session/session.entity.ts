@@ -45,6 +45,7 @@ export abstract class Session extends VendureEntity implements HasCustomFields {
      * Allows targeted invalidation on key revocation or rotation.
      * @since 3.5.0
      */
+    @Index()
     @Column({ nullable: true })
     apiKeyId?: string;
 

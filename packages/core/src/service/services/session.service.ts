@@ -10,6 +10,7 @@ import { Logger } from '../../config';
 import { ConfigService } from '../../config/config.service';
 import { CachedSession, SessionCacheStrategy } from '../../config/session-cache/session-cache-strategy';
 import { TransactionalConnection } from '../../connection/transactional-connection';
+import { ApiKey } from '../../entity/api-key/api-key.entity';
 import { Channel } from '../../entity/channel/channel.entity';
 import { Order } from '../../entity/order/order.entity';
 import { Role } from '../../entity/role/role.entity';
@@ -108,6 +109,8 @@ export class SessionService implements EntitySubscriberInterface, OnApplicationB
         ctx: RequestContext,
         user: User,
         authenticationStrategyName: string,
+        apiKeyId?: ID,
+        customDurationMs?: number,
     ): Promise<AuthenticatedSession> {
         const token = await this.generateSessionToken();
         const guestOrder =
@@ -116,17 +119,45 @@ export class SessionService implements EntitySubscriberInterface, OnApplicationB
                 : undefined;
         const existingOrder = await this.orderService.getActiveOrderForUser(ctx, user.id);
         const activeOrder = await this.orderService.mergeOrders(ctx, user, guestOrder, existingOrder);
-        const duration = this.getSessionDurationMsForStrategy(authenticationStrategyName);
+        let duration = this.sessionDurationInMs;
+        if (typeof customDurationMs === 'number' && customDurationMs > 0) {
+            duration = customDurationMs;
+        } else if (apiKeyId) {
+            // Compute base duration for API-key sessions:
+            // - use per-scope override if configured
+            // - otherwise default to the key's remaining lifetime if it has an expiry
+            // - otherwise fall back to global sessionDuration
+            const apiKey = await this.connection.rawConnection.getRepository(ApiKey).findOne({
+                where: { id: String(apiKeyId) as any },
+            });
+            const now = Date.now();
+            const apiKeyCfg = (this.configService.authOptions as any).apiKey ?? {};
+            const override =
+                (apiKey?.scope === 'admin'
+                    ? apiKeyCfg.admin?.sessionDuration
+                    : apiKeyCfg.shop?.sessionDuration) ?? undefined;
+            if (override != null) {
+                const baseMs = typeof override === 'string' ? ms(override) : override;
+                duration = baseMs;
+            } else if (apiKey?.expiresAt) {
+                duration = Math.max(0, apiKey.expiresAt.getTime() - now);
+            } else {
+                duration = this.sessionDurationInMs;
+            }
+            // Always cap to key expiry if present
+            if (apiKey?.expiresAt) {
+                duration = Math.min(duration, Math.max(0, apiKey.expiresAt.getTime() - now));
+            }
+        }
         const authenticatedSession = await this.connection.getRepository(ctx, AuthenticatedSession).save(
             new AuthenticatedSession({
                 token,
                 user,
                 activeOrder,
                 authenticationStrategy: authenticationStrategyName,
-                // API key sessions have a short TTL by default for security hardening.
-                // @since 3.5.0
                 expires: this.getExpiryDate(duration),
                 invalidated: false,
+                ...(apiKeyId ? { apiKeyId: String(apiKeyId) } : {}),
             }),
         );
         await this.withTimeout(this.sessionCacheStrategy.set(this.serializeSession(authenticatedSession)));
@@ -345,6 +376,28 @@ export class SessionService implements EntitySubscriberInterface, OnApplicationB
     }
 
     /**
+     * Find an active (non-expired, non-invalidated) authenticated session linked to a given API key.
+     * Returns the most recently updated one if multiple exist.
+     * @since 3.5.0
+     */
+    async findActiveSessionByApiKeyId(
+        ctx: RequestContext,
+        apiKeyId: ID,
+    ): Promise<AuthenticatedSession | undefined> {
+        const qb = this.connection
+            .getRepository(ctx, AuthenticatedSession)
+            .createQueryBuilder('session')
+            .leftJoinAndSelect('session.user', 'user')
+            .leftJoinAndSelect('user.roles', 'roles')
+            .leftJoinAndSelect('roles.channels', 'channels')
+            .where('session.apiKeyId = :apiKeyId', { apiKeyId: String(apiKeyId) })
+            .andWhere('session.invalidated = false')
+            .andWhere('session.expires > :now', { now: new Date() })
+            .orderBy('session.updatedAt', 'DESC');
+        return qb.getOne() ?? undefined;
+    }
+
+    /**
      * @description
      * Triggers the clean sessions job.
      */
@@ -388,15 +441,48 @@ export class SessionService implements EntitySubscriberInterface, OnApplicationB
      */
     private async updateSessionExpiry(session: Session) {
         const now = new Date().getTime();
-        const duration = this.isAuthenticatedSession(session)
-            ? this.getSessionDurationMsForStrategy(session.authenticationStrategy)
-            : this.sessionDurationInMs;
+        let duration = this.sessionDurationInMs;
+        // If this is an API key-backed session, use per-scope override as base and cap by key expiry if present.
+        if (this.isAuthenticatedSession(session) && (session as any).apiKeyId) {
+            const apiKeyId = (session as any).apiKeyId as string;
+            const apiKey = await this.connection.rawConnection.getRepository(ApiKey).findOne({
+                where: { id: apiKeyId as any },
+            });
+            if (apiKey?.expiresAt) {
+                const remaining = apiKey.expiresAt.getTime() - now;
+                if (remaining <= 0) {
+                    // Already expired; do not extend and clamp expiry to key expiry if needed.
+                    if (session.expires > apiKey.expiresAt) {
+                        await this.connection.rawConnection
+                            .getRepository(Session)
+                            .update({ id: session.id }, { expires: apiKey.expiresAt });
+                        session.expires = apiKey.expiresAt;
+                    }
+                    return;
+                }
+                // Pick base duration from config override by scope if provided
+                const apiKeyCfg = (this.configService.authOptions as any).apiKey ?? {};
+                const base =
+                    (apiKey.scope === 'admin'
+                        ? apiKeyCfg.admin?.sessionDuration
+                        : apiKeyCfg.shop?.sessionDuration) ?? this.configService.authOptions.sessionDuration;
+                const baseMs = typeof base === 'string' ? ms(base) : base;
+                duration = Math.min(baseMs, remaining);
+                // Also clamp if current expiry exceeds key expiry
+                if (session.expires.getTime() > apiKey.expiresAt.getTime()) {
+                    await this.connection.rawConnection
+                        .getRepository(Session)
+                        .update({ id: session.id }, { expires: apiKey.expiresAt });
+                    session.expires = apiKey.expiresAt;
+                }
+            }
+        }
         if (session.expires.getTime() - now < duration / 2) {
             const newExpiryDate = this.getExpiryDate(duration);
-            session.expires = newExpiryDate;
             await this.connection.rawConnection
                 .getRepository(Session)
                 .update({ id: session.id }, { expires: newExpiryDate });
+            session.expires = newExpiryDate;
         }
     }
 
@@ -423,17 +509,5 @@ export class SessionService implements EntitySubscriberInterface, OnApplicationB
 
     private isAuthenticatedSession(session: Session): session is AuthenticatedSession {
         return session.hasOwnProperty('user');
-    }
-
-    /**
-     * Resolve the configured TTL for a given authentication strategy.
-     * Defaults to global session TTL for non-apiKey strategies.
-     */
-    private getSessionDurationMsForStrategy(authenticationStrategyName?: string): number {
-        if (authenticationStrategyName === 'apiKey') {
-            const configured = this.configService.authOptions.adminApiKey?.sessionDuration ?? '15m';
-            return typeof configured === 'string' ? ms(configured) : configured;
-        }
-        return this.sessionDurationInMs;
     }
 }

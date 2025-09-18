@@ -6,32 +6,32 @@ import { PERMISSIONS_METADATA_KEY } from '../../decorators/allow.decorator';
 import { ApiKeyResolver } from './api-key.resolver';
 
 describe('ApiKeyResolver permissions', () => {
-    it('guards apiKeys query with ReadServiceAccount', () => {
+    it('guards apiKeys query with Authenticated', () => {
         const meta = Reflect.getMetadata(
             PERMISSIONS_METADATA_KEY,
             (ApiKeyResolver.prototype as any).apiKeys,
         ) as string[];
         expect(meta).toBeTruthy();
-        expect(meta).toContain('ReadServiceAccount');
+        expect(meta).toContain('Authenticated');
     });
 
-    it('guards createApiKey mutation with CreateServiceAccount', () => {
+    it('guards createApiKey mutation with Authenticated', () => {
         const meta = Reflect.getMetadata(
             PERMISSIONS_METADATA_KEY,
             (ApiKeyResolver.prototype as any).createApiKey,
         ) as string[];
         expect(meta).toBeTruthy();
-        expect(meta).toContain('CreateServiceAccount');
+        expect(meta).toContain('Authenticated');
     });
 
-    it('guards rotate/revoke/invalidate with UpdateServiceAccount', () => {
+    it('guards rotate/revoke/invalidate with Authenticated', () => {
         for (const method of ['rotateApiKey', 'revokeApiKey', 'invalidateApiKeySessions'] as const) {
             const meta = Reflect.getMetadata(
                 PERMISSIONS_METADATA_KEY,
                 (ApiKeyResolver.prototype as any)[method],
             ) as string[];
             expect(meta).toBeTruthy();
-            expect(meta).toContain('UpdateServiceAccount');
+            expect(meta).toContain('Authenticated');
         }
     });
 });

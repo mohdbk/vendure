@@ -5,10 +5,10 @@ import crypto from 'crypto';
 import { RequestContext } from '../../api/common/request-context';
 import { UserInputError } from '../../common/error/errors';
 import { ListQueryOptions } from '../../common/types/common-types';
-import { getConfig } from '../../config/config-helpers';
+import { ConfigService } from '../../config/config.service';
 import { TransactionalConnection } from '../../connection/transactional-connection';
-import { Administrator } from '../../entity/administrator/administrator.entity';
 import { ApiKey } from '../../entity/api-key/api-key.entity';
+import { User } from '../../entity/user/user.entity';
 import { ListQueryBuilder } from '../helpers/list-query-builder/list-query-builder';
 import { PasswordCipher } from '../helpers/password-cipher/password-cipher';
 
@@ -26,16 +26,19 @@ export class ApiKeyService {
         private readonly passwordCipher: PasswordCipher,
         private readonly sessionService: SessionService,
         private readonly listQueryBuilder: ListQueryBuilder,
+        private readonly configService: ConfigService,
     ) {}
 
-    /** List keys for an Administrator. @since 3.5.0 */
-    async listByAdministrator(
+    // listByAdministrator removed; use listByUser instead.
+
+    /** List keys for a User. @since 3.5.0 */
+    async listByUser(
         ctx: RequestContext,
-        administratorId: ID,
+        userId: ID,
         options?: ListQueryOptions<ApiKey>,
     ): Promise<PaginatedList<ApiKey>> {
         const qb = this.listQueryBuilder.build(ApiKey, options, {
-            where: { administrator: { id: administratorId as any } },
+            where: { user: { id: userId as any } },
             ctx,
         });
         const [items, totalItems] = await qb.getManyAndCount();
@@ -45,17 +48,13 @@ export class ApiKeyService {
     /** Create a new key and return its raw value once. @since 3.5.0 */
     async create(
         ctx: RequestContext,
-        input: { administratorId: ID; name: string; expiresAt?: Date | null; notes?: string | null },
+        input: { userId: ID; name: string; expiresAt: Date; notes?: string | null },
     ): Promise<{ apiKey: ApiKey; rawKey: string }> {
-        const administrator = await this.connection.getEntityOrThrow(
-            ctx,
-            Administrator,
-            input.administratorId,
-        );
-        // Enforce unique key name per Administrator for active keys
+        const user = await this.connection.getEntityOrThrow(ctx, User, input.userId);
+        // Enforce unique key name per User for active keys
         const existing = await this.connection.getRepository(ctx, ApiKey).findOne({
             where: {
-                administrator: { id: administrator.id as any },
+                user: { id: user.id as any },
                 name: input.name,
                 status: 'active',
             },
@@ -63,17 +62,19 @@ export class ApiKeyService {
         if (existing) {
             throw new UserInputError('error.api-key-name-already-exists');
         }
-        const { rawKey, prefix } = await this.generateRawKey();
+        const rawKey = await this.generateRawKey();
         const keyHash = await this.passwordCipher.hash(rawKey);
+        const lookupHash = this.fingerprint(rawKey);
         const apiKey = await this.connection.getRepository(ctx, ApiKey).save(
             new ApiKey({
-                administrator,
+                user,
                 name: input.name,
-                prefix,
                 keyHash,
+                lookupHash,
                 status: 'active',
-                expiresAt: input.expiresAt ?? null,
+                expiresAt: input.expiresAt,
                 notes: input.notes ?? null,
+                scope: 'admin',
             }),
         );
         // Never log rawKey. Caller is responsible to display it once.
@@ -82,11 +83,9 @@ export class ApiKeyService {
 
     /** Rotate: mint a new key, revoke the old, invalidate sessions. @since 3.5.0 */
     async rotate(ctx: RequestContext, id: ID): Promise<{ apiKey: ApiKey; rawKey: string }> {
-        const current = await this.connection.getEntityOrThrow(ctx, ApiKey, id, {
-            relations: ['administrator'],
-        });
-        if (current.status === 'revoked') {
-            throw new UserInputError('error.cannot-rotate-revoked-key');
+        const current = await this.connection.getEntityOrThrow(ctx, ApiKey, id);
+        if (current.status !== 'active') {
+            throw new UserInputError('error.api-key-not-active');
         }
         // Revoke current
         current.status = 'revoked';
@@ -95,17 +94,19 @@ export class ApiKeyService {
         await this.invalidateSessionsForKey(ctx, current.id);
 
         // Create new
-        const { rawKey, prefix } = await this.generateRawKey();
+        const rawKey = await this.generateRawKey();
         const keyHash = await this.passwordCipher.hash(rawKey);
+        const lookupHash = this.fingerprint(rawKey);
         const newKey = await this.connection.getRepository(ctx, ApiKey).save(
             new ApiKey({
-                administrator: current.administrator,
+                user: current.user,
                 name: current.name,
-                prefix,
                 keyHash,
+                lookupHash,
                 status: 'active',
-                expiresAt: current.expiresAt ?? null,
+                expiresAt: current.expiresAt,
                 notes: current.notes ?? null,
+                scope: current.scope ?? 'admin',
             }),
         );
         return { apiKey: newKey, rawKey };
@@ -114,6 +115,9 @@ export class ApiKeyService {
     /** Revoke and invalidate sessions. @since 3.5.0 */
     async revoke(ctx: RequestContext, id: ID): Promise<ApiKey> {
         const key = await this.connection.getEntityOrThrow(ctx, ApiKey, id);
+        if (key.status !== 'active') {
+            throw new UserInputError('error.api-key-not-active');
+        }
         key.status = 'revoked';
         key.revokedAt = new Date();
         await this.connection.getRepository(ctx, ApiKey).save(key, { reload: false });
@@ -122,34 +126,30 @@ export class ApiKeyService {
     }
 
     /** Validate a presented raw key. @since 3.5.0 */
-    async validateRawKey(
+    async verifyRawKey(
         ctx: RequestContext,
         rawKey: string,
-    ): Promise<{ administrator: Administrator; apiKey: ApiKey } | false> {
+    ): Promise<{ user: import('../../entity/user/user.entity').User; apiKey: ApiKey } | false> {
         // Ensure we never log the raw secret
-        const prefix = this.detectPrefix(rawKey);
         const now = new Date();
-        const candidates = await this.connection.getRepository(ctx, ApiKey).find({
-            where: { prefix, status: 'active' },
-            relations: [
-                'administrator',
-                'administrator.user',
-                'administrator.user.roles',
-                'administrator.user.roles.channels',
-            ],
+        const lookupHash = this.fingerprint(rawKey);
+        const candidate = await this.connection.getRepository(ctx, ApiKey).findOne({
+            where: { lookupHash, status: 'active' },
+            relations: ['user', 'user.roles', 'user.roles.channels'],
         });
-        for (const candidate of candidates) {
-            if (candidate.expiresAt && candidate.expiresAt < now) {
-                continue;
-            }
-            const ok = await this.passwordCipher.check(rawKey, candidate.keyHash);
-            if (ok) {
-                // Best-effort last-used update
-                void this.markUsed(ctx, candidate.id);
-                return { administrator: candidate.administrator, apiKey: candidate };
-            }
+        if (!candidate) {
+            return false;
         }
-        return false;
+        if (candidate.expiresAt && candidate.expiresAt < now) {
+            return false;
+        }
+        const ok = await this.passwordCipher.check(rawKey, candidate.keyHash);
+        if (!ok) {
+            return false;
+        }
+        // Best-effort last-used update
+        void this.markUsed(ctx, candidate.id);
+        return { user: candidate.user, apiKey: candidate };
     }
 
     /** Record last-used timestamp (async, best-effort). @since 3.5.0 */
@@ -159,40 +159,52 @@ export class ApiKeyService {
 
     /** Invalidate all sessions minted from a key. @since 3.5.0 */
     async invalidateSessionsForKey(ctx: RequestContext, apiKeyId: ID): Promise<number> {
+        const key = await this.connection
+            .getRepository(ctx, ApiKey)
+            .findOne({ where: { id: apiKeyId as any } });
+        if (!key) {
+            return 0;
+        }
+        if (key.status !== 'active') {
+            throw new UserInputError('error.api-key-not-active');
+        }
         return this.sessionService.invalidateSessionsByApiKeyId(ctx, apiKeyId);
     }
 
-    private async generateRawKey(): Promise<{ rawKey: string; prefix: string }> {
-        const env = process.env.NODE_ENV;
-        const { live, test } = this.getConfiguredPrefixes();
-        const prefix = env === 'production' ? live : test;
-        // 32 bytes -> 43 url-safe chars
+    /** Permanently delete a key if it belongs to the current user; also invalidate sessions. */
+    async delete(
+        ctx: RequestContext,
+        id: ID,
+    ): Promise<{ result: 'DELETED' | 'NOT_DELETED'; message?: string }> {
+        const key = await this.connection.getRepository(ctx, ApiKey).findOne({ where: { id: id as any } });
+        if (!key) {
+            return { result: 'NOT_DELETED', message: 'Key not found' };
+        }
+        if (!ctx.activeUserId || String(key.user?.id ?? '') !== String(ctx.activeUserId)) {
+            return { result: 'NOT_DELETED', message: 'Not authorized to delete this key' };
+        }
+        await this.invalidateSessionsForKey(ctx, id);
+        await this.connection.getRepository(ctx, ApiKey).remove(key);
+        return { result: 'DELETED' };
+    }
+
+    private async generateRawKey(): Promise<string> {
+        const strategy = this.configService.authOptions.apiKey?.generationStrategy;
+        if (strategy) {
+            const raw = await strategy.generate();
+            return raw;
+        }
+        // Fallback default: single vk_ prefix
         const secret = crypto.randomBytes(32).toString('base64url');
-        return { rawKey: `${prefix}${secret}`, prefix };
+        return `vk_${secret}`;
     }
 
-    private detectPrefix(rawKey: string): string {
-        // Prefer exact extraction based on known secret length (43 base64url chars)
-        const SECRET_LEN = 43;
-        if (rawKey.length > SECRET_LEN) {
-            return rawKey.slice(0, rawKey.length - SECRET_LEN);
+    private fingerprint(rawKey: string): string {
+        const strategy = this.configService.authOptions.apiKey?.generationStrategy;
+        if (strategy) {
+            return strategy.fingerprint(rawKey);
         }
-        // Fallback to configured prefixes
-        const { live, test } = this.getConfiguredPrefixes();
-        if (live && rawKey.startsWith(live)) return live;
-        if (test && rawKey.startsWith(test)) return test;
-        // Final fallback to historical defaults
-        if (rawKey.startsWith('vk_live_')) return 'vk_live_';
-        if (rawKey.startsWith('vk_test_')) return 'vk_test_';
-        return 'vk_live_';
-    }
-
-    private getConfiguredPrefixes(): { live: string; test: string } {
-        const cfg: any = getConfig() as any;
-        const opt = cfg?.authOptions?.adminApiKey?.prefix;
-        if (typeof opt === 'string') {
-            return { live: opt, test: opt };
-        }
-        return opt ?? { live: 'vk_live_', test: 'vk_test_' };
+        // Fallback to SHA-256
+        return crypto.createHash('sha256').update(rawKey).digest('hex');
     }
 }

@@ -342,6 +342,7 @@ export class RequestContext {
      * Set the Admin API key id used to authenticate this context, if any.
      * Used to associate the created session to the API key for targeted invalidation.
      * @since 3.5.0
+     * @internal
      */
     setApiKeyId(id: ID) {
         this._apiKeyId = id;

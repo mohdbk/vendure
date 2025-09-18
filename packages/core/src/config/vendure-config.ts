@@ -410,33 +410,36 @@ export interface AuthOptions {
     sessionDuration?: string | number;
     /**
      * @description
-     * Options for Admin API key authentication strategy.
-     *
+     * API key configuration.
      * @since 3.5.0
      */
-    adminApiKey?: {
+    apiKey?: {
         /**
          * @description
-         * Controls the prefix used when generating Admin API keys. Prefixes help identify the key type at a glance
-         * and are stored alongside the hashed secret to optimize lookups.
-         *
-         * - production: `vk_live_` (default)
-         * - non-production: `vk_test_` (default)
-         *
-         * You may override this with a single string (used for all environments), or provide distinct `live` and `test` prefixes.
-         *
-         * @default { live: 'vk_live_', test: 'vk_test_' }
+         * Strategy used to generate and fingerprint API keys globally (Admin/Shop).
+         * @default DefaultApiKeyGenerationStrategy
          */
-        prefix?: string | { live: string; test: string };
+        generationStrategy?: import('./auth/api-key-generation-strategy').ApiKeyGenerationStrategy;
         /**
          * @description
-         * Session duration specifically for sessions created via the Admin API key strategy.
-         * Use a shorter TTL to limit the lifetime of non-interactive sessions.
-         * Accepts milliseconds as number or timespan string per zeit/ms (e.g. `'15m'`).
-         *
-         * @default '15m'
+         * Admin API options.
+         * - enabled: turn Admin header-based API key auth on/off (default true)
+         * - sessionDuration: base TTL for API-key sessions on Admin API (still capped by key expiry)
          */
-        sessionDuration?: string | number;
+        admin?: {
+            enabled?: boolean;
+            sessionDuration?: string | number;
+        };
+        /**
+         * @description
+         * Shop API options.
+         * - enabled: turn Shop header-based API key auth on/off (default false)
+         * - sessionDuration: base TTL for API-key sessions on Shop API (still capped by key expiry)
+         */
+        shop?: {
+            enabled?: boolean;
+            sessionDuration?: string | number;
+        };
     };
     /**
      * @description

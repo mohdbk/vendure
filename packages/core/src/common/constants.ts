@@ -70,9 +70,6 @@ export const DEFAULT_PERMISSIONS: PermissionDefinition[] = [
     new CrudPermissionDefinition('StockLocation'),
     new CrudPermissionDefinition('System'),
     new CrudPermissionDefinition('Zone'),
-    // API Access: CRUD permissions for ServiceAccount (Admin API keys)
-    // @since 3.5.0
-    new CrudPermissionDefinition('ServiceAccount'),
 ];
 
 export function getAllPermissionsMetadata(customPermissions: PermissionDefinition[]): PermissionMetadata[] {
